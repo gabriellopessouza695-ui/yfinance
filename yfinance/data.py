@@ -12,7 +12,7 @@ from . import utils, cache
 from .utils import frozendict
 from .config import YfConfig
 import threading
-
+import random 
 from .exceptions import YFException, YFDataException, YFRateLimitError
 
 
@@ -400,19 +400,32 @@ class YfData(metaclass=SingletonMeta):
         return crumb, strategy
 
     @utils.log_indent_decorator
-    def get(self, url, params=None, timeout=30):
-        response = self._make_request(url, request_method = self._session.get, params=params, timeout=timeout)
+    def get(self, url, params=None, timeout=30, max_retries=3):
+        for tentativa in range(max_retries):
+            try:
+                response = self._make_request(url,
+                                request_method=self._session.get,
+                                params=params,
+                                timeout=timeout)
+                limitado = response.status_code == 429      # caso 2: resposta 429
+            except YFRateLimitError:
+                limitado = True                             # caso 1: 429 no crumb
+                self._crumb = None                          # descarta crumb inválido
 
-        # Accept cookie-consent if redirected to consent page
-        if not self._is_this_consent_url(response.url):
-            # "Consent Page not detected"
-            pass
-        else:
-            # "Consent Page detected"
-            response = self._accept_consent_form(response, timeout)
+            if not limitado:
+                if self._is_this_consent_url(response.url):
+                    response = self._accept_consent_form(response, timeout)
+                return response
 
-        return response
+            if tentativa < max_retries - 1:
+                espera = (2 ** tentativa) + random.uniform(0, 1)
+                utils.get_yf_logger().warning(
+                    f"Rate limit atingido. Aguardando {espera:.1f}s... "
+                    f"(tentativa {tentativa + 1}/{max_retries})"
+                )
+                _time.sleep(espera)
 
+        raise YFRateLimitError()
     @utils.log_indent_decorator
     def post(self, url, body=None, params=None, timeout=30, data=None, headers=None):
         return self._make_request(url, request_method = self._session.post, body=body, params=params, timeout=timeout, data=data, headers=headers)
